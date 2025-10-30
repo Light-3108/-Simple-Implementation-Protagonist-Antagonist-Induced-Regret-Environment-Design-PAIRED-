@@ -1,70 +1,64 @@
-import random
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.distributions import Categorical
-import numpy as np
-# def set_seed(seed=42):
-#     random.seed(seed)                      
-#     np.random.seed(seed)                   
-#     torch.manual_seed(seed)                
-#     torch.cuda.manual_seed(seed)           
-#     torch.cuda.manual_seed_all(seed)       
-#     torch.backends.cudnn.deterministic = True  
-#     torch.backends.cudnn.benchmark = False     
-
-# set_seed(123)  
 
 class Adversary(nn.Module):
-    def __init__(self, num_actions=64, conv_filters=64, fc_hidden=256):
+    def __init__(self, num_actions=64):
         super(Adversary, self).__init__()
+
+        # CNN feature extractor (matching antagonist depth)
+        self.conv_net = nn.Sequential(
+            nn.Conv2d(3, 16, kernel_size=3, stride=1),  # (batch, 16, 8, 8)
+            nn.ReLU(),
+            nn.Conv2d(16, 32, kernel_size=3, stride=1), # (batch, 32, 6, 6)
+            nn.ReLU(),
+            nn.Conv2d(32, 64, kernel_size=3, stride=1), # (batch, 64, 4, 4)
+            nn.ReLU(),
+            nn.Flatten(),                               # (batch, 1024)
+        )
+
+        # Timestep encoding (expanded)
+        self.t_fc = nn.Linear(1, 32)
         
-        # 1st convolution 
-        self.conv = nn.Conv2d(in_channels=3, out_channels=conv_filters, kernel_size=3)  # (batch, conv_filters, 8, 8)
+        # z embedding (for stochasticity, size 20)
+        self.z_fc = nn.Linear(20, 32)
 
-        # Timestep embedding
-        self.t_fc = nn.Linear(1, 10)
+        # Fully connected layers (matching antagonist structure)
+        self.fc1 = nn.Linear(1024 + 32 + 32, 256)  # CNN + timestep + z
+        self.fc2 = nn.Linear(256, 128)
 
-        # Fully connected after concatenation of conv features + timestep embedding + random vector z
-        conv_out_size = conv_filters * 8 * 8
-        self.fc_combined = nn.Linear(conv_out_size + 10 + 10, fc_hidden)
-
-        # Additional FC layers
-        self.fc1 = nn.Linear(fc_hidden, 32)
-        self.fc2 = nn.Linear(32, 32)
-
-        # Policy head
-        self.policy = nn.Linear(32, num_actions)
-
-        # Value head
-        self.value = nn.Linear(32, 1)
+        # Policy & Value heads
+        self.policy = nn.Linear(128, num_actions)
+        self.value = nn.Linear(128, 1)
 
     def forward(self, obs, t, z):
-
+        """
+        obs: tensor (batch, 3, 10, 10)
+        t: tensor (batch, 1) - timestep
+        z: tensor (batch, 20) - random vector for stochasticity
+        """
         batch_size = obs.size(0)
 
-        # Conv layers
-        x = obs
-        # x = obs.permute(0,3,1,2)  # (1,10,10,3)
-        x = F.relu(self.conv(x))          # (batch, conv_filters, 8, 8)
-        x = x.reshape(batch_size, -1)     # flatten → (batch, conv_filters*8*8)
+        # CNN feature extraction
+        x = self.conv_net(obs)
 
         # Timestep embedding
-        t_emb = F.relu(self.t_fc(t))      # (batch, 10)
+        t_emb = F.relu(self.t_fc(t))
+        
+        # z embedding
+        z_emb = F.relu(self.z_fc(z))
 
-        # Concatenate with random vector z
-        combined = torch.cat([x, t_emb, z], dim=-1)  # (batch, conv+10+50)
+        # Concatenate CNN + timestep + z
+        features = torch.cat([x, t_emb, z_emb], dim=-1)
 
-        # Fully connected after concatenation
-        h = F.relu(self.fc_combined(combined))
-
-        # Additional FC layers
-        h = F.relu(self.fc1(h))
+        # Fully connected
+        h = F.relu(self.fc1(features))
         h = F.relu(self.fc2(h))
 
         # Outputs
-        policy_logits = self.policy(h)  # (batch, num_actions)
-        value = self.value(h)           # (batch, 1)
+        policy_logits = self.policy(h)
+        value = self.value(h)
 
         dist = Categorical(logits=policy_logits)
         return dist, value

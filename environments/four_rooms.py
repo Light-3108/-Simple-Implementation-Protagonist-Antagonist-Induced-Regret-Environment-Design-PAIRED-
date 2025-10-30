@@ -69,23 +69,23 @@ class SimpleEnv(MiniGridEnv):
             self.put_obj(Wall(),5,i)
         
 
-        # while True:
-        #     x = np.random.randint(1, 8)
-        #     y = np.random.randint(1, 8)
-        #     x1 = np.random.randint(1, 8)
-        #     y1 = np.random.randint(1, 8)
+        while True:
+            x = np.random.randint(1, 8)
+            y = np.random.randint(1, 8)
+            x1 = np.random.randint(1, 8)
+            y1 = np.random.randint(1, 8)
             
-        #     # Ensure agent and goal are not at the same position
-        #     if (x, y) != (x1, y1) and self.grid.get(x, y) is None and self.grid.get(x1, y1) is None:
-        #         break
+            # Ensure agent and goal are not at the same position
+            if (x, y) != (x1, y1) and self.grid.get(x, y) is None and self.grid.get(x1, y1) is None:
+                break
                
-        # self.agent_pos = (x, y)
-        # self.agent_dir = np.random.randint(0, 4)  # 0-3 for directions
-        # self.put_obj(Goal(), x1, y1)
-
-        self.agent_pos = (7, 8)
+        self.agent_pos = (x, y)
         self.agent_dir = np.random.randint(0, 4)  # 0-3 for directions
-        self.put_obj(Goal(), 2, 2)
+        self.put_obj(Goal(), x1, y1)
+
+        # self.agent_pos = (7, 8)
+        # self.agent_dir = np.random.randint(0, 4)  # 0-3 for directions
+        # self.put_obj(Goal(), 2, 2)
 
         
 

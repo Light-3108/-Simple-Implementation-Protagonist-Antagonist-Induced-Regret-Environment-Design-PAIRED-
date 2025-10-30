@@ -1,19 +1,19 @@
 import torch
 import matplotlib.pyplot as plt
 from minigrid.wrappers import FullyObsWrapper
-# from environments.out_of_dist import make_env
+# from environments.two_rooms import make_env
 
 
 from protagonist_mdp import Protagonist
 from antagonist import Antagonist
 from gymnasium.vector import SyncVectorEnv, AsyncVectorEnv
-from environments.four_rooms import make_env
+from environments.two_rooms import make_env
 from helper import *
 import imageio
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-model = Antagonist(num_actions=3).to(device)
-model.load_state_dict(torch.load("Antagonist_1200.pth", map_location=device))
+model = Protagonist(num_actions=3).to(device)
+model.load_state_dict(torch.load("./saved_models/Protagonist_2200.pth", map_location=device))
 model.eval()
 
 
@@ -28,7 +28,7 @@ frames = []
 #     obs = obs.permute(2, 0, 1)  # → [3,7,7]
 #     return obs
 
-episodes = 50
+episodes = 1
 episode_rewards = []
 
 
@@ -66,7 +66,7 @@ for ep in range(episodes):
 
 env.close()
 
-# imageio.mimsave("2_rooms.gif", frames, fps=5, loop=0)
+imageio.mimsave("2_rooms.gif", frames, fps=5, loop=0)
 
 # mean_reward = np.mean(episode_rewards)
 # no_solved = np.sum(np.array(episode_rewards) > 0)

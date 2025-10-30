@@ -112,80 +112,20 @@ def state_to_tensor(obs, device): #[30,7,7,3]
 #         return total_reward
     
 def ppo_loss(new_dist, actions, old_log_probs, advantages, clip_param):
-    ########### Policy Gradient update for actor with clipping - PPO #############
-    
-    # 1. Find the new probability 
-    # Work out the probability (log probability) that the agent will NOW take
-    # the action it took during the rollout
-    # We assume there has been some optimisation steps between when the action was taken and now so the
-    # probability has probably changed
+
     new_log_probs = new_dist.log_prob(actions)
-    
-    # 2. Find the ratio of new to old - r_t(theta)
-    # Calculate the ratio of new/old action probability (remember we have log probabilities here)
-    # log(new_prob) - log(old_prob) = log(new_prob/old_prob)
-    # exp(log(new_prob/old_prob)) = new_prob/old_prob
-    # We use the ratio of new/old action probabilities (not just the log probability of the action like in
-    # vanilla policy gradients) so that if there is a large difference between the probabilities then we can
-    # take a larger/smaller update step
-    # EG: If we want to decrease the probability of taking an action but the new action probability
-    # is now higher than it was before we can take a larger update step to correct this
     ratio = (new_log_probs - old_log_probs).exp()
-
-    # 3. Calculate the ratio * advantage - the first term in the MIN statement
-    # We want to MAXIMISE the (Advantage * Ratio)
-    # If the advantage is positive this corresponds to INCREASING the probability of taking that action
-    # If the advantage is negative this corresponds to DECREASING the probability of taking that action
     surr1 = ratio * advantages
-
-    # 4. Calculate the (clipped ratio) * advantage - the second term in the MIN statement
-    # PPO goes a bit further, if we simply update update using the Advantage * Ratio we will sometimes
-    # get very large or very small policy updates when we don't want them
-    #
-    # EG1: If we want to increase the probability of taking an action but the new action probability
-    # is now higher than it was before we will take a larger step, however if the action probability is
-    # already higher we don't need to keep increasing it (large output values can create instabilities).
-    #
-    # EG2: You can also consider the opposite case where we want to decrease the action probability
-    # but the probability has already decreased, in this case we will take a smaller step than before,
-    # which is also not desirable as it will slow down the "removal" (decreasing the probability)
-    # of "bad" actions from our policy.
     surr2 = torch.clamp(ratio, 1.0 - clip_param, 1.0 + clip_param) * advantages
-    
-    # 5. Take the minimum of the two "surrogate" losses
-    # PPO therefore clips the upper bound of the ratio when the advantage is positive
-    # and clips the lower bound of the ratio when the advantage is negative so our steps are not too large
-    # or too small when necessary, it does this by using a neat trick of simply taking the MIN of two "surrogate"
-    # losses which chooses which loss to use!
     actor_loss = torch.min(surr1, surr2)
-    
-    # 6. Return the Expectation over the batch
     return actor_loss.mean()
 
 def clipped_critic_loss(new_value, old_value, returns, clip_param):
-    ########### Value Function update for critic with clipping #############
-    
-    # To help stabalise the training of the value function we can do a similar thing as the clipped objective
-    # for PPO - Note: this is NOT nessisary but does help!
-        
-    # 1. MSE/L2 loss on the current value and the returns
+
     vf_loss1 = (new_value - returns).pow(2.)
-    
-    # 2. MSE/L2 loss on the clipped value and the returns
-    # Here we create an "approximation" of the new value (aka the current value) by finding the difference
-    # between the "new" and "old" value and adding a clipped amount back to the old value
     vpredclipped = old_value + torch.clamp(new_value - old_value, -clip_param, clip_param)
-    # Note that we ONLY backprop through the new value
     vf_loss2 = (vpredclipped - returns).pow(2.)
-    
-    # 3. Take the MAX between the two losses
-    # This trick has the effect of only updating the current value DIRECTLY if is it WORSE (higher error)
-    # than the old value. 
-    # If the old value was worse then the "approximation" will be worse and we update
-    # the new value only a little bit!
     critic_loss = torch.max(vf_loss1, vf_loss2)
-    
-    # 4. Return the Expectation over the batch
     return critic_loss.mean()
 
 def compute_gae(next_value, rewards, masks, values, gamma=0.999, tau=0.95):

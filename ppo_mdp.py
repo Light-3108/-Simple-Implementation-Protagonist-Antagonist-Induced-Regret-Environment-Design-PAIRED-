@@ -21,20 +21,19 @@ from protagonist_mdp import Protagonist
 from parallel_env import make_env
 from adversary import Adversary
 from antagonist import Antagonist
-from gymnasium.vector import SyncVectorEnv, AsyncVectorEnv
-
+from gymnasium.vector import SyncVectorEnv, AutoresetMode
 num_envs = 30
 device = torch.device(0 if torch.cuda.is_available() else "cpu")
 print("Using device:", device)
 lr = 0.0001
 # How many minibatchs (therefore optimization steps) we want per epoch 
-num_mini_batch = 8
+num_mini_batch = 1
 num_mini_batch_ad = 1
 # Total number of steps during the rollout phase 
 num_steps = 256 
 num_steps_ad = 20
 # Number of Epochs for training
-ppo_epochs = 4
+ppo_epochs = 5
 
 # PPO parameters
 gamma = 0.995
@@ -60,6 +59,8 @@ def ppo_update(data_buffer, ppo_epochs, clip_param):
             agent_loss.backward()
             nn.utils.clip_grad_norm_(rl_model.parameters(), 40)
             optimizer.step()
+        if _ == ppo_epochs - 1:  # Only log last epoch
+            print(f"  Loss_protagonist - Actor: {actor_loss.item():.4f}, Critic: {critic_loss.item():.4f}, Entropy: {entropy.item():.4f}")
 
 
 def ppo_update_an(data_buffer, ppo_epochs, clip_param):
@@ -79,7 +80,8 @@ def ppo_update_an(data_buffer, ppo_epochs, clip_param):
             agent_loss.backward()
             nn.utils.clip_grad_norm_(an_model.parameters(), 40)
             an_optimizer.step()
-
+        if _ == ppo_epochs - 1:  # Only log last epoch
+            print(f"  Loss_antagonist - Actor: {actor_loss.item():.4f}, Critic: {critic_loss.item():.4f}, Entropy: {entropy.item():.4f}")
 
 def ppo_update_ad(data_buffer, ppo_epochs, clip_param):
     for _ in range(ppo_epochs):
@@ -96,9 +98,9 @@ def ppo_update_ad(data_buffer, ppo_epochs, clip_param):
             ad_optimizer.zero_grad()
             agent_loss.backward()
             nn.utils.clip_grad_norm_(ad_model.parameters(), 40)
-            print("hello")
             ad_optimizer.step()
-
+        if _ == ppo_epochs - 1:  # Only log last epoch
+            print(f"  Loss_adversary - Actor: {actor_loss.item():.4f}, Critic: {critic_loss.item():.4f}, Entropy: {entropy.item():.4f}")
 
 
 
@@ -137,22 +139,25 @@ ad_optimizer = optim.Adam(ad_model.parameters(), lr=lr)
 an_model = Antagonist().to(device)
 an_optimizer = optim.Adam(an_model.parameters(), lr=lr)
 
-env_fns = [make_env(rank=i, global_seed=42, agent=ad_model) for i in range(num_envs)]
-envs = SyncVectorEnv(env_fns)
+env_fns = [make_env(agent=ad_model) for i in range(num_envs)]
+envs = SyncVectorEnv(env_fns, autoreset_mode=AutoresetMode.DISABLED)
 start_time = time.time()
 
 antagonist_performance = []
 protagonist_performance = []
 while frames_seen < max_frames:
     rl_model.train()
+    an_model.train()
+    ad_model.train()
     # Initialise state
     start_state, _ = envs.reset()  #[30,7,7,3]
-    if rollouts%70 == 0:
+    if rollouts%15 == 0:
         first_env = envs.envs[0] 
-        grid_img = first_env.render()
+        grid_img = first_env.render()   
         plt.imshow(grid_img)
+        #saving to snap_shots folder
         plt.title(f"Grid at {frames_seen} frames")
-        plt.savefig(f"grid_at_{frames_seen}.png")
+        plt.savefig(f"./snap_shots/grid_at_{frames_seen}.png")
         plt.close()
     obs = start_state['image']
     direction = torch.tensor(start_state['direction'], dtype=torch.long).to(device)  # Shape: [num_envs]
@@ -261,6 +266,14 @@ while frames_seen < max_frames:
             # Take the next step in the env
             next_state, reward, termination, truncation, info = envs.step(action.cpu().numpy())
             done = np.logical_or(termination, truncation)
+
+            for i in range(num_envs):
+                if termination[i] or truncation[i]:
+                    reset_obs, reset_info = envs.envs[i].reset(options={"keep_world": True})
+                    next_state['image'][i] = reset_obs['image']
+                    next_state['direction'][i] = reset_obs['direction']
+                    envs._autoreset_envs[i] = False 
+
             cnt += (reward>0).sum()
             # Reset hidden states for environments that finished
             # done is a numpy array of shape (num_envs,) with True/False values
@@ -278,7 +291,7 @@ while frames_seen < max_frames:
             directions.append(direction)
 
             direction = torch.tensor(next_state['direction'], dtype=torch.long).to(device)  # Shape: [num_envs]
-            next_state = next_state['image']
+            next_state = next_state['image']    
             state = state_to_tensor(next_state, device)
             step += 1
         
@@ -286,7 +299,13 @@ while frames_seen < max_frames:
         protagonist_performance.append(cnt)
         cnt = 0
         step = 0
-        start_state, _ = envs.reset()  #[30,7,7,3]
+        # start_state, _ = envs.reset(options = {"keep_world": True})  #[30,7,7,3]
+        start_state = {'image': np.zeros((num_envs, 10, 10, 3), dtype=np.uint8), 'direction': np.zeros((num_envs,), dtype=np.int64)}
+        for i, env in enumerate(envs.envs):
+            obss, infoss = env.reset(options={"keep_world": True})
+            start_state['image'][i] = obss['image']
+            start_state['direction'][i] = obss['direction']
+
         obs = start_state['image']
         direction_an = torch.tensor(start_state['direction'], dtype=torch.long).to(device)  # Shape: [num_envs]
         state_an = state_to_tensor(obs, device)
@@ -300,6 +319,13 @@ while frames_seen < max_frames:
             # Take the next step in the env
             next_state_an, reward_an, termination_an, truncation_an, info_an = envs.step(action.cpu().numpy())
             done = np.logical_or(termination_an, truncation_an)
+
+            for i in range(num_envs):
+                if termination_an[i] or truncation_an[i]:
+                    reset_obs, reset_info = envs.envs[i].reset(options={"keep_world": True})
+                    next_state_an['image'][i] = reset_obs['image']
+                    next_state_an['direction'][i] = reset_obs['direction']
+                    envs._autoreset_envs[i] = False 
 
             cnt += (reward_an>0).sum()
             # Reset hidden states for environments that finished
@@ -324,17 +350,24 @@ while frames_seen < max_frames:
         
         #  regret calculation and updating adversary reward
 
-        ant = torch.stack([r.squeeze(-1) for r in rewards_an])   # (T, N)
+        ant = torch.stack([r.squeeze(-1) for r in rewards_an])  #(steps,num_env)
         prot = torch.stack([r.squeeze(-1) for r in rewards])
-
-        ant_max = ant.max(dim=0).values
-        mask = prot != 0
-        prot_sum = prot.sum(dim=0)
-        prot_count = mask.sum(dim=0)
+        # ant_max = ant.max(dim=0).values # (num_env)
+        mask = prot != 0 #(steps,num_env)
+        mask1 = ant != 0
+        prot_sum = prot.sum(dim=0) #(32)
+        ant_sum = ant.sum(dim=0)
+        prot_count = mask.sum(dim=0) #(32)
+        ant_count = mask1.sum(dim=0)
         prot_mean = torch.where(prot_count > 0, prot_sum / prot_count, torch.zeros_like(prot_sum))
-        new_last = torch.clamp(ant_max - prot_mean, min=0).unsqueeze(-1)
-        rewards_ad[-1] = new_last
+        ant_mean = torch.where(ant_count > 0, ant_sum / ant_count, torch.zeros_like(ant_sum))
+        regret = torch.clamp(ant_mean - prot_mean, min=0).unsqueeze(-1)
+        rewards_ad[-1] = regret
 
+        print(f"REGRET STATISTICS (Rollout {rollouts}):")
+        print(f"  Antagonist max:  {ant_mean.mean():.3f} ± {ant_mean.std():.3f} | range [{ant_mean.min():.3f}, {ant_mean.max():.3f}]")
+        print(f"  Protagonist mean: {prot_mean.mean():.3f} ± {prot_mean.std():.3f} | range [{prot_mean.min():.3f}, {prot_mean.max():.3f}]")
+        print(f"  Regret:          {regret.mean():.3f} ± {regret.std():.3f} | range [{regret.min():.3f}, {regret.max():.3f}]")
 
         print(f"Antagonist: {cnt}")
         antagonist_performance.append(cnt)
@@ -399,6 +432,17 @@ while frames_seen < max_frames:
     # With the stabalisation techniques in PPO we can "safely" take many steps with a single
     # batch of rollouts, therefore we usualy train with the data over multiple epochs whereas basic
     # actor critic methods only use one epoch.
+    # Before updating each agent
+    print(f"\nVALUE PREDICTIONS:")
+    print(f"  Protagonist values:  {torch.cat(list(values)).mean():.3f} ± {torch.cat(list(values)).std():.3f}")
+    print(f"  Antagonist values:   {torch.cat(list(values_an)).mean():.3f} ± {torch.cat(list(values_an)).std():.3f}")
+    print(f"  Adversary values:    {torch.cat(list(values_ad)).mean():.3f} ± {torch.cat(list(values_ad)).std():.3f}")
+
+    # Before updating each agent
+    print(f"\nVALUE PREDICTIONS:")
+    print(f"  Protagonist values:  {torch.cat(list(values)).mean():.3f} ± {torch.cat(list(values)).std():.3f}")
+    print(f"  Antagonist values:   {torch.cat(list(values_an)).mean():.3f} ± {torch.cat(list(values_an)).std():.3f}")
+    print(f"  Adversary values:    {torch.cat(list(values_ad)).mean():.3f} ± {torch.cat(list(values_ad)).std():.3f}")
     print("Training")
     ppo_update(data_buffer, ppo_epochs, clip_param)
     ppo_update_an(data_buffer_an, ppo_epochs, clip_param)
@@ -418,7 +462,7 @@ while frames_seen < max_frames:
         # frames_logger.append(frames_seen)
         # print("Trained on %d Frames, Test Score [%d/%d]" 
         #     %(frames_seen, test_score))
-        if rollouts%400 == 0:
+        if rollouts%200 == 0:
             # save protagonist and antagonist performance graph too
             plt.figure(figsize=(12,5))
             plt.subplot(1,2,1)
@@ -433,11 +477,11 @@ while frames_seen < max_frames:
             plt.xlabel('Rollouts')
             plt.ylabel('Performance')
             plt.legend()
-            plt.savefig(f'performance_{rollouts}.png')
+            plt.savefig(f'./saved_figures/performance_{rollouts}.png')
             plt.close()
-            torch.save(rl_model.state_dict(), f"Protagonist_{rollouts}.pth")
-            torch.save(an_model.state_dict(), f"Antagonist_{rollouts}.pth")
-            torch.save(ad_model.state_dict(), f"Adversary_{rollouts}.pth")
+            torch.save(rl_model.state_dict(), f"./saved_models/Protagonist_{rollouts}.pth")
+            torch.save(an_model.state_dict(), f"./saved_models/Antagonist_{rollouts}.pth")
+            torch.save(ad_model.state_dict(), f"./saved_models/Adversary_{rollouts}.pth")
         print("Trained on %d Frames" 
             %(frames_seen))
         time_to_end = ((time.time() - start_time) / frames_seen) * (max_frames - frames_seen)

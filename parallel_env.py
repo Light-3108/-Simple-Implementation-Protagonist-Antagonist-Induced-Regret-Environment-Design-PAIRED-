@@ -22,8 +22,7 @@ import seed_counter
 class SimpleEnv(MiniGridEnv):
     def __init__(
         self,
-        adversary_agent,   # Gradient flow roknu parla ata ni
-        base_seed: int,
+        adversary_agent, 
         size=10,
         log_probs_ad=None, values_ad=None, states_ad=None,
         actions_ad=None, rewards_ad=None, masks_ad=None,
@@ -31,7 +30,6 @@ class SimpleEnv(MiniGridEnv):
         max_steps: int | None = None,
         **kwargs,
     ):
-        self.base_seed = base_seed 
         self.adversary_agent = adversary_agent
         self.log_probs_ad = log_probs_ad if log_probs_ad is not None else deque()
         self.values_ad = values_ad if values_ad is not None else deque()
@@ -45,6 +43,9 @@ class SimpleEnv(MiniGridEnv):
 
         self.agent_start_pos = (1,1)  # this will be overwritten by NN
         self.agent_start_dir = 0 # this too. 
+
+        self.initial_agent_pos = None
+        self.initial_agent_dir = None
 
         mission_space = MissionSpace(mission_func=self._gen_mission)
 
@@ -60,9 +61,6 @@ class SimpleEnv(MiniGridEnv):
             **kwargs,
         )
 
-        self._seed = None
-        self.np_random = None
-        self.torch_gen = None
 
     # def seed(self):
     #     """Always deterministic RNG based on base_seed."""
@@ -71,13 +69,6 @@ class SimpleEnv(MiniGridEnv):
 
     def reset(self, *, seed=None, options=None):
 
-
-        #manual control garnu parye
-        # do varied_seed = self.base_seed when options is None
-        varied_seed = self.base_seed + seed_counter.seed_count
-        self.np_random = np.random.default_rng(varied_seed)
-        self.torch_gen = torch.Generator().manual_seed(varied_seed)
-        
         # Clear history containers
         self.log_probs_ad.clear()
         self.values_ad.clear()
@@ -88,7 +79,21 @@ class SimpleEnv(MiniGridEnv):
         self.time_ad.clear()
         self.z_ad.clear()
         
-        return super().reset(seed=seed, options=options)
+        if options is not None and "keep_world" in options:
+            # while True:
+            #     x = np.random.randint(1, self.width - 1)
+            #     y = np.random.randint(1, self.height - 1)
+            #     if self.grid.get(x,y) is None:
+            #         break
+            self.step_count = 0
+            self.agent_pos = self.initial_agent_pos
+            self.agent_dir = self.initial_agent_dir
+        else:
+            super().reset(seed=seed, options=options)
+
+        obs = self.gen_obs()
+        info = {}
+        return obs, info
     
     @staticmethod
     def _gen_mission():
@@ -120,67 +125,63 @@ class SimpleEnv(MiniGridEnv):
         self.goal_pos = None
 
         obs = self.grid.encode()  # full obs ko lagi
+        # Use a single latent z per episode (environment generation) so the maze structure is coherent
         with torch.no_grad():
+            z_tensor = torch.randn(1, 20)  # (1,20) fixed for this episode
             for t in range(20):
-
                 obs_tensor = torch.from_numpy(obs).float().unsqueeze(0)  # (1,15,15,3)
                 obs_tensor = obs_tensor.permute(0, 3, 1, 2)  # (1,3,15,15)
                 t_tensor = torch.tensor([[t]], dtype=torch.float32)  # (1,1)
-                z_tensor = torch.randn(1, 10, generator=self.torch_gen)  # (1,50) # every episode ma different maze aayos vanera ho
 
                 dist, value = self.adversary_agent(obs_tensor, t_tensor, z_tensor)
-                obs_tensor = obs_tensor.permute(0,2,3,1)
-                probs = dist.probs
-                action = torch.multinomial(probs, num_samples=1, generator=self.torch_gen).squeeze(-1)
+                obs_tensor_for_store = obs_tensor.permute(0,2,3,1)  # back to (1,15,15,3)
+                action = dist.sample().squeeze(-1)
                 log_prob = dist.log_prob(action)
-                # prob = F.softmax(policy_logits, dim=-1)  # (1,169)
-                # action = torch.multinomial(prob, num_samples=1).item() #(1,1)
 
-                self.states_ad.append(obs_tensor)
-                self.actions_ad.append(action)  
+                # Store rollout data (no need for .detach() inside no_grad, kept implicit)
+                self.states_ad.append(obs_tensor_for_store)
+                self.actions_ad.append(action)
                 self.log_probs_ad.append(log_prob)
                 self.values_ad.append(value)
-                self.rewards_ad.append(0.0) 
-                if (t < 19):
-                    self.masks_ad.append(1.0)
-                else:
-                    self.masks_ad.append(0.0)
+                self.rewards_ad.append(0.0)
+                self.masks_ad.append(1.0 if t < 19 else 0.0)
                 self.time_ad.append(t_tensor)
                 self.z_ad.append(z_tensor)
 
-                action = action.item()
-                action += 1
-                x = (action - 1) % 8 + 1
-                y = (action - 1) // 8 + 1
+                # Decode action -> place objects
+                a = action.item() + 1
+                x = (a - 1) % 8 + 1
+                y = (a - 1) // 8 + 1
                 if t == 0:
                     self.agent_pos = (x, y)
-                    self.agent_dir = 0
+                    self.agent_dir = np.random.randint(0,4)
+                    self.initial_agent_pos = (x,y)
+                    self.initial_agent_dir = self.agent_dir
                 elif t == 1:
-                    x,y = self.check_valid_positions(x,y,self.agent_pos)
+                    x, y = self.check_valid_positions(x, y, self.agent_pos)
                     if x != -1:
                         self.put_obj(Goal(), x, y)
                         self.goal_pos = (x, y)
                     else:
-                        #place the goal randomly
+                        # place the goal randomly if clash
                         while True:
-                            x = self.np_random.integers(1, self.width - 1)
-                            y = self.np_random.integers(1, self.height - 1)
-                            if (x,y) != self.agent_pos:
+                            x = np.random.randint(1, self.width - 1)
+                            y = np.random.randint(1, self.height - 1)
+                            if (x, y) != self.agent_pos:
                                 break
                         self.put_obj(Goal(), x, y)
                         self.goal_pos = (x, y)
-                else:  
-                    x,y = self.check_valid_positions(x,y,self.agent_pos,self.goal_pos)
+                else:
+                    x, y = self.check_valid_positions(x, y, self.agent_pos, self.goal_pos)
                     if x != -1:
                         self.put_obj(Wall(), x, y)
-                obs = self.grid.encode()  # update obs after each placement
+                obs = self.grid.encode()
         self.mission = "grand mission"
 
 
-def make_env(rank, global_seed=42, agent = None):
+def make_env(agent = None):
     def _init():
-        base_seed = global_seed + rank
-        env = SimpleEnv(adversary_agent=agent, base_seed=base_seed, render_mode="rgb_array")
+        env = SimpleEnv(adversary_agent=agent, render_mode="rgb_array")
         env = FullyObsWrapper(env)
         return env
     return _init
@@ -190,41 +191,34 @@ def make_env(rank, global_seed=42, agent = None):
 
 def main():
 
-
-
-    # env = make_env(0, global_seed=42)()
     adversary = Adversary()
-    adversary.load_state_dict(torch.load("Adversary_1200.pth"))
-    adversary.eval()
     num_envs = 30
-    env_fns = [make_env(rank=i, global_seed=42, agent=adversary) for i in range(num_envs)]
+    env_fns = [make_env(agent=adversary) for i in range(num_envs)]
     env = SyncVectorEnv(env_fns)
 
+    # env1 = env.envs[0]
+    obs, info = env.reset()
     env1 = env.envs[0]
-    manual_control = ManualControl(env1)
-    manual_control.start()
-    # obs, infos = env.reset(options={"should_regenerate": False})
-    # obs1 = obs['image'][0]
-    # obs, infos = env.reset(options={"should_regenerate": False})
-    # obs2 = obs['image'][0]
+    grid_img = env1.render()
+    plt.imshow(grid_img)
+    plt.title(f"Grid at {1} frames")
+    plt.savefig(f"grid_at_{1}.png")
+    plt.close()
 
-    # obs, infos = env.reset(options=20)
-    # obs1 = obs['image'][0]
-    # obs2 = obs['image'][1]
-    # # # obs, infos = env.reset(options=20)
-    # # # obs2 = obs['image'][0]
-    # assert np.array_equal(obs1, obs2)
-    # obs, infos = env.reset(options=21)
-    # obs3 = obs['image'][0]
-    # obs, infos = env.reset(options=21)
-    # obs4 = obs['image'][0]
+    obs, info = env.reset(options = {"keep_world": True})
+    env1 = env.envs[0]
+    grid_img = env1.render()
+    plt.imshow(grid_img)
+    plt.title(f"Grid at {2} frames")
+    plt.savefig(f"grid_at_{2}.png")
+    plt.close()
+    obs, info = env.reset() 
 
-    # assert np.array_equal(obs1, obs2)
-    # assert np.array_equal(obs3, obs4)
-    # assert not np.array_equal(obs1, obs3)
+    # for env in env.envs:
+    #     env.env.step_count = 18
+    #     print(env.env.step_count)   # go to simple env from full obs wrapper i.e env.env
 
 if __name__ == "__main__":
     main()
-
 
 
